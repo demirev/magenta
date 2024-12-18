@@ -1,9 +1,9 @@
 import uuid
 from typing import List, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import HttpUrl, HttpMethod
+from pydantic import HttpUrl
 from core.config import logger, tenant_collections
-from core.models import ToolWithContext, ToolParameter, ContextParameter, ToolParameters, ExternalToolBody, ToolBody
+from core.models import ToolWithContext, ToolParameter, ContextParameter, ToolParameters, ExternalToolBody, ToolBody, HttpMethod
 
 tools_router = APIRouter(prefix="/tools", tags=["tools"])
 

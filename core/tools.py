@@ -4,7 +4,7 @@ import httpx
 import uuid
 from datetime import datetime
 from typing import Callable, Dict, List, Any
-from core.models import Tool, ToolWithContext, Insight, HttpMethod, Action
+from core.models import Tool, ToolWithContext, HttpMethod
 from core.config import logger, tenant_collections
 
 # helpers for validating definitions --------------------------------------------

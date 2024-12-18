@@ -76,7 +76,6 @@ async def send_chat(
 	message: str,
 	background_tasks: BackgroundTasks,
 	tenant_id: str = "default",
-	callback_url: Optional[str] = None,
 	dry_run: Optional[bool] = False,
 	db: Session = Depends(get_db)
 ):
@@ -104,7 +103,6 @@ async def send_chat(
 			prompts_collection=prompts_collection,
 			documents_collection=documents_collection,
 			tools_collection=tools_collection,
-			callback_url=callback_url,
 			dry_run=dry_run,
 			call_llm_func=call_gpt,
 			rag_func=perform_postgre_search,

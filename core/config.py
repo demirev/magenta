@@ -28,11 +28,12 @@ MONGO_HOST = os.getenv('MONGO_HOST', 'localhost')
 MONGO_PORT = int(os.getenv('MONGO_PORT', 27017))
 MONGO_DB = os.getenv('MONGO_DB', 'magenta')
 SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL')
+SECRET_KEY = os.getenv('SECRET_KEY')
 
 
 # load the spacy model
 # spacy_model = spacy.load("en_core_web_lg")
-
+spacy_model = None
 
 # establish connection to MongoDB
 mongo_client = MongoClient(MONGO_HOST, MONGO_PORT)

@@ -3,10 +3,10 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
 from fastapi import Depends
-from core.utils import get_db
-from core.config import logger, openai_client, spacy_model
+from core.config import logger, openai_client, spacy_model, get_db
+from core.models import ToolWithContext
 from services.document_service import perform_postgre_search, add_rag_results_to_message, add_documents_to_sysprompt
-from core.tools import tool_handler, get_tools
+from core.tools import tool_handler
 
 
 def call_gpt(
@@ -93,6 +93,28 @@ def call_gpt_single(
   )
 
   return result
+
+
+def get_tools(sysprompt, tools_collection):
+  if "toolset" in sysprompt:
+    logger.info(f"Toolset found in sysprompt: {sysprompt['toolset']}")
+    tools = []
+    tools_names = sysprompt["toolset"]
+    for tool_name in tools_names:
+      tool = tools_collection.find_one({"function.name": tool_name}, {"_id": 0})
+      if not tool:
+        raise ValueError(f"Tool {tool_name} not found.")      
+      # Validate the tool using the ToolWithContext model
+      validated_tool = ToolWithContext(**tool)
+      tool_dict = validated_tool.model_dump(exclude_none=True)
+      # Remove context parameters before appending to tools list
+      if validated_tool.context_parameters:
+        tool_dict.pop('context_parameters')
+      tools.append(tool_dict)
+  else:
+    tools = None
+  logger.info(f"Tools found in db: {tools}") 
+  return tools
 
 
 def call_llm_and_process_tools(

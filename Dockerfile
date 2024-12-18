@@ -14,7 +14,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # RUN python -m spacy download en_core_web_lg
 
 # Copy the rest of the application code into the container
-COPY app/ ./app
+COPY core/ ./core
+COPY routes/ ./routes
+COPY services/ ./services
+COPY main.py ./main.py
+COPY __init__.py ./__init__.py
 COPY logs/ ./logs
 COPY data/ ./data
 COPY tests/ ./tests
@@ -23,4 +27,4 @@ COPY tests/ ./tests
 ENV PYTHONPATH=/app
 
 # Command to run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

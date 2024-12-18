@@ -4,19 +4,24 @@ import uvicorn
 import json
 from typing import Annotated
 from datetime import timedelta
-from core.config import logger, mongo_client, spacy_model, engine
-from core.config import tenant_collections
-from routes import tasks_router, prompts_router, documents_router, chats_router, tools_router, tenants_router
-from services import load_prompts_from_files, load_documents_from_files
-from core.utils import cleanup_mongo
-from core.security import Token, OAuth2PasswordRequestForm, ACCESS_TOKEN_EXPIRE_MINUTES, User, users_collection
-from core.security import authenticate_user, create_access_token, get_current_active_user, create_initial_users
-from core.tools import load_all_functions_in_db
 from contextlib import asynccontextmanager
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from core.config import get_db, SLACK_WEBHOOK_URL
-from core.utils import create_postgres_extensions, send_slack_message
+
+from core import (
+    logger, mongo_client, spacy_model, engine,
+    tenant_collections, get_db, SLACK_WEBHOOK_URL,
+    Token, OAuth2PasswordRequestForm, ACCESS_TOKEN_EXPIRE_MINUTES,
+    User, users_collection, authenticate_user, create_access_token,
+    get_current_active_user, create_initial_users,
+    load_all_functions_in_db, cleanup_mongo,
+    create_postgres_extensions, send_slack_message
+)
+from routes import (
+    prompts_router, documents_router, chats_router,
+    tools_router, tenants_router
+)
+from services import load_prompts_from_files, load_documents_from_files
 
 os.makedirs("temp", exist_ok=True) # create temp directory for file uploads
 
@@ -60,14 +65,13 @@ app.include_router(chats_router)
 app.include_router(prompts_router)
 app.include_router(tools_router)
 app.include_router(documents_router)
-app.include_router(tasks_router)
 app.include_router(tenants_router)
 
 
 # some key routes
 @app.get("/")
 async def read_root():
-	return {"message": "Welcome to Bryte AI"}
+	return {"message": "Magenta LLM agent framework"}
 
 
 @app.get("/healthcheck")
