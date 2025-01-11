@@ -10,9 +10,14 @@ from .document_service import perform_postgre_search, add_rag_results_to_message
 
 
 def call_gpt(
-    messages, sysprompt=None, client=openai_client, 
-    json_mode=False, model = "gpt-4o", tools=None, tool_choice="auto"
-  ):
+    messages: list[dict], 
+    sysprompt: str = None, 
+    client=openai_client, 
+    json_mode: bool = False, 
+    model: str = "gpt-4o", 
+    tools: list[dict] = None, 
+    tool_choice: str = "auto"
+  ) -> dict:
   logger.info(f"Calling GPT")
   if sysprompt is not None:
     messages.insert(0, {"role": "developer", "content": sysprompt})
@@ -209,7 +214,8 @@ def process_chat(
     spacy_model=spacy_model,
     function_dictionary=default_function_dictionary,
     skip_word=None, # e.g. "PASS" might mean "don't send message" depending on the prompt
-    sysprompt_suffix: Optional[str] = None # this will be added to the end of the sysprompt. Usefull for runtime modifications of the sysprompt
+    sysprompt_suffix: Optional[str] = None, # this will be added to the end of the sysprompt. Usefull for runtime modifications of the sysprompt
+    new_images: Optional[list[str]] = None # a list of base64 encoded images to be added to the message
 ):
   try:
 
@@ -257,7 +263,25 @@ def process_chat(
 
     # add new message and update collection
     old_messages = chat["messages"]
-    new_message = {"message_id":"q-"+message_id, "role": "user", "content": new_message, "timestamp": datetime.now()}
+    if new_images is None:
+      new_message = {
+        "message_id":"q-"+message_id, 
+        "role": "user", 
+        "content": new_message, 
+        "timestamp": datetime.now()
+      }
+    else:
+      new_message = {
+        "message_id":"q-"+message_id, 
+        "role": "user", 
+        "content": [
+          {"type": "text", "text": new_message}
+        ] + [
+          {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}} 
+          for image in new_images
+        ],
+        "timestamp": datetime.now()
+      }
     new_messages = old_messages + [new_message]
     
     # note: we add 'q-' to the message_id to differentiate between user and assistant messages part of the same exchange

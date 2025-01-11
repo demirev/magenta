@@ -1,4 +1,5 @@
 import uuid
+import base64
 from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, Query
 from fastapi.exceptions import HTTPException
 from typing import Optional, List, Any, Dict
@@ -69,6 +70,7 @@ async def send_chat(
 	chat_id: str,
 	message: str,
 	background_tasks: BackgroundTasks,
+	images: Optional[List[UploadFile]] = None,
 	tenant_id: str = "default",
 	dry_run: Optional[bool] = False,
 	db: Session = Depends(get_db)
@@ -87,6 +89,15 @@ async def send_chat(
 		# create a message_id for the response
 		message_id = str(uuid.uuid4())
 
+		# Convert uploaded files to base64 if present
+		base64_images = None
+		if images:
+			base64_images = []
+			for img in images:
+				contents = await img.read()
+				base64_encoded = base64.b64encode(contents).decode('utf-8')
+				base64_images.append(base64_encoded)
+
 		background_tasks.add_task(
 			process_chat,
 			chat_id=chat_id,
@@ -103,7 +114,8 @@ async def send_chat(
 			rag_table_name=tenant_id, # using tenant_id as table_name for now, later we might have separate schemas for different tenants
 			persist_rag_results=False,
 			db=db,
-			spacy_model=None
+			spacy_model=None,
+			new_images=base64_images
 		)
 
 		return {"task_id": message_id, "status":"pending"}
