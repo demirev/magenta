@@ -15,8 +15,7 @@ def call_gpt(
   ):
   logger.info(f"Calling GPT")
   if sysprompt is not None:
-    # add {role: "system", content: sysprompt} to the beginning of the messages list
-    messages.insert(0, {"role": "system", "content": sysprompt})
+    messages.insert(0, {"role": "developer", "content": sysprompt})
 
   # make sure messages don't include message_id and timestamp
   messages = [{k: v for k, v in d.items() if k != "message_id" and k != "timestamp"} for d in messages]
@@ -220,10 +219,9 @@ def process_chat(
       raise ValueError(f"Chat {chat_id} not found.")
 
     # Update chat status to in_progress
-    old_statuses = chat["statuses"]
-    new_statuses = old_statuses + [{"message_id": message_id, "status": "in_progress"}]
+    new_status = {"message_id": message_id, "status": "in_progress"}
     chats_collection.update_one(
-      {"chat_id": chat_id}, {"$set": {"statuses": new_statuses}}
+      {"chat_id": chat_id}, {"$push": {"statuses": new_status}}
     )
 
     # Find the sysprompt
@@ -259,11 +257,12 @@ def process_chat(
 
     # add new message and update collection
     old_messages = chat["messages"]
-    new_messages = old_messages + [{"message_id":"q-"+message_id, "role": "user", "content": new_message, "timestamp": datetime.now()}]
-    # note: we add 'q-' to the message_id to differentiate between user and assistant messages part of the same exchange
+    new_message = {"message_id":"q-"+message_id, "role": "user", "content": new_message, "timestamp": datetime.now()}
+    new_messages = old_messages + [new_message]
     
+    # note: we add 'q-' to the message_id to differentiate between user and assistant messages part of the same exchange
     chats_collection.update_one(
-      {"chat_id": chat_id}, {"$set": {"messages": new_messages}}
+      {"chat_id": chat_id}, {"$push": {"messages": new_message}} # push only the new message
     )
 
     if rag_result is not None and not persist_rag_results:
@@ -302,14 +301,12 @@ def process_chat(
         result.pop("message")
     
     # update mongo
-    new_statuses = old_statuses + [{"message_id": message_id, "status": "completed"}]
-    new_messages = [dict(item) for item in new_messages]
-    if new_messages[0]["role"] == "system":
-      new_messages.pop(0) # don't save system prompt
-    new_messages = new_messages + [{"message_id": message_id, "role": "assistant", "content": result["message"], "timestamp": datetime.now()}]
+    new_status = {"message_id": message_id, "status": "completed"}
+    response_message = {"message_id": message_id, "role": "assistant", "content": result["message"], "timestamp": datetime.now()}
+    
     chats_collection.update_one(
       {"chat_id": chat_id}, 
-      {"$set": {"statuses": new_statuses, "messages": new_messages}}
+      {"$push": {"statuses": new_status, "messages": response_message}}
     )
     logger.info(f"Chat {chat_id} completed successfully.")
 
