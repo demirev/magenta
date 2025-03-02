@@ -202,6 +202,7 @@ def process_chat(
     tools_collection,
     sysprompt_id: Optional[str] = None, # used to overwrite the sysprompt id saved in the chat object
     callback_func=None,
+    error_callback_func=None,
     dry_run=False,
     json_mode=False,
     tool_choice="auto",
@@ -338,13 +339,13 @@ def process_chat(
     if callback_func is not None:
       logger.info(f"Sending messages for chat {chat_id}.")
       
-      session_id = chats_collection.find_one(
-        {"chat_id": chat_id}
-      )["context_id"]
+      #session_id = chats_collection.find_one(
+      #  {"chat_id": chat_id}
+      #)["context_id"]
       
       callback_func(
         result["message"], 
-        session_id
+        chat_id
       )
 
       logger.info(f"Message callback sent successfully: {result['message']}")
@@ -353,4 +354,6 @@ def process_chat(
 
   except Exception as e:
     logger.error(f"Error processing chat {chat_id}: {e}")  # TODO update status
+    if error_callback_func is not None:
+      error_callback_func(chat_id, e)
 
