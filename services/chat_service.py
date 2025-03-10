@@ -353,7 +353,8 @@ def process_chat(
     return result
 
   except Exception as e:
-    logger.error(f"Error processing chat {chat_id}: {e}")  # TODO update status
+    logger.error(f"Error processing chat {chat_id}: {e}")
     if error_callback_func is not None:
       error_callback_func(chat_id, e)
+    raise e
 
