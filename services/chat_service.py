@@ -128,6 +128,7 @@ def call_llm_and_process_tools(
     json_mode=False,
     tool_choice="auto",
     context_arguments=None,
+    model="gpt-4o",
     max_chained_tool_calls=10
 ):
   logger.info("Calling LLM")
@@ -137,7 +138,8 @@ def call_llm_and_process_tools(
     sysprompt=sysprompt["prompt"],
     tools=tools,
     json_mode=json_mode,
-    tool_choice=tool_choice
+    tool_choice=tool_choice,
+    model=model
   )
   logger.info(f"LLM response received: {llm_result['message']}")
   
@@ -207,6 +209,7 @@ def process_chat(
     json_mode=False,
     tool_choice="auto",
     call_llm_func=call_gpt,
+    model="gpt-5-mini",
     rag_func=perform_postgre_search,
     rag_table_name: str = None,
     persist_rag_results=False,
@@ -317,7 +320,8 @@ def process_chat(
         tool_handler=tool_handler,
         tools_collection=tools_collection,
         context_arguments=context_arguments,
-        function_dictionary=function_dictionary
+        function_dictionary=function_dictionary,
+        model=model
       )
 
     if skip_word is not None: 

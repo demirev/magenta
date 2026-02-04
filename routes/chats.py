@@ -73,7 +73,8 @@ async def send_chat(
 	images: Optional[List[UploadFile]] = None,
 	tenant_id: str = "default",
 	dry_run: Optional[bool] = False,
-	db: Session = Depends(get_db)
+	db: Session = Depends(get_db),
+	model: str = "gpt-5-mini"
 ):
 	try:
 		chats_collection = tenant_collections.get_collection(tenant_id, "chats")
@@ -110,6 +111,7 @@ async def send_chat(
 			tools_collection=tools_collection,
 			dry_run=dry_run,
 			call_llm_func=call_gpt,
+			model=model,
 			rag_func=perform_postgre_search,
 			rag_table_name=tenant_id, # using tenant_id as table_name for now, later we might have separate schemas for different tenants
 			persist_rag_results=False,
