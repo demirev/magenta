@@ -50,7 +50,7 @@ def call_gpt(
       )
     
     result = {
-      "message":json.loads(result.choices[0].message.content)
+      "message":json.loads(completion.choices[0].message.content)
     }
   else:
     if len(tools):
