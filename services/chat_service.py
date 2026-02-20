@@ -25,6 +25,11 @@ def call_gpt(
   # make sure messages don't include message_id and timestamp
   messages = [{k: v for k, v in d.items() if k != "message_id" and k != "timestamp"} for d in messages]
 
+  # OpenAI requires content to be a string (or multimodal array), not a dict
+  for msg in messages:
+    if isinstance(msg.get("content"), dict):
+      msg["content"] = json.dumps(msg["content"])
+
   if not tools:
     logger.info(f"No tools found.")
     tools = []
@@ -49,8 +54,9 @@ def call_gpt(
         messages=messages
       )
     
+    content = completion.choices[0].message.content
     result = {
-      "message":json.loads(completion.choices[0].message.content)
+      "message": json.loads(content) if content is not None else None
     }
   else:
     if len(tools):
@@ -183,11 +189,12 @@ def call_llm_and_process_tools(
     # new call with tool results
     logger.info("Calling LLM with tool results.")
     llm_result = call_llm_func(
-      messages=new_messages, 
+      messages=new_messages,
       sysprompt=sysprompt["prompt"],
       tools=tools,
       json_mode=json_mode,
-      tool_choice=tool_choice
+      tool_choice=tool_choice,
+      model=model
     )
 
   result = {"message":llm_result["message"]}
@@ -331,7 +338,10 @@ def process_chat(
     
     # update mongo
     new_status = {"message_id": message_id, "status": "completed"}
-    response_message = {"message_id": message_id, "role": "assistant", "content": result["message"], "timestamp": datetime.now()}
+    content = result["message"]
+    if isinstance(content, dict):
+      content = json.dumps(content)
+    response_message = {"message_id": message_id, "role": "assistant", "content": content, "timestamp": datetime.now()}
     
     chats_collection.update_one(
       {"chat_id": chat_id}, 
