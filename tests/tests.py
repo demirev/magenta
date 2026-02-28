@@ -231,6 +231,41 @@ def test_message_sending_endpoints():
   assert delete_chat_response.json()["message"] == "Chat deleted successfully"
 
 
+def test_streaming_endpoint():
+  # create chat
+  create_chat_response = client.post("/chats/create", params={
+    "chat_id": "test_stream_user",
+    "context_id": "test_context"
+  })
+  assert create_chat_response.status_code == 200
+  chat_id = create_chat_response.json()["chat_id"]
+
+  # stream a message with dry_run=True
+  events = []
+  with client.stream("POST", f"/chats/{chat_id}/send/stream", params={
+    "message": "Test message",
+    "dry_run": True
+  }) as response:
+    assert response.status_code == 200
+    for line in response.iter_lines():
+      if line.startswith("data: "):
+        events.append(json.loads(line[6:]))
+
+  chunk_events = [e for e in events if e.get("type") == "chunk"]
+  done_events = [e for e in events if e.get("type") == "done"]
+  assert len(chunk_events) >= 1
+  assert len(done_events) == 1
+  message_id = done_events[0]["message_id"]
+
+  # message should have been persisted to MongoDB
+  get_message_response = client.get(f"/chats/{chat_id}/messages/{message_id}")
+  assert get_message_response.status_code == 200
+  assert get_message_response.json()["content"] == "This is a test message."
+
+  # cleanup
+  client.delete(f"/chats/{chat_id}")
+
+
 def test_tool_calling():
   # check that the tool is available
   roll_dice_tool = client.get("/tools/?name=roll_dice")

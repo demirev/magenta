@@ -1,11 +1,12 @@
 import uuid
 import base64
 from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, Query
+from fastapi.responses import StreamingResponse
 from fastapi.exceptions import HTTPException
 from typing import Optional, List, Any, Dict
 from core.config import logger, tenant_collections, get_db
 from core.models import Task, Chat, ChatInternalMessage, ChatMessage, AgentType
-from services.chat_service import process_chat, call_gpt
+from services.chat_service import process_chat, call_gpt, stream_chat
 from services.document_service import perform_postgre_search
 from sqlalchemy.orm import Session
 
@@ -125,6 +126,59 @@ async def send_chat(
 	except Exception as e:
 		logger.error(f"Error sending chat: {e}")
 		raise HTTPException(status_code=400, detail="Error sending chat")
+
+
+@chats_router.post("/{chat_id}/send/stream")
+async def send_chat_stream(
+	chat_id: str,
+	message: str,
+	images: Optional[List[UploadFile]] = None,
+	tenant_id: str = "default",
+	dry_run: Optional[bool] = False,
+	db: Session = Depends(get_db),
+	model: str = "gpt-4o"
+):
+	try:
+		chats_collection = tenant_collections.get_collection(tenant_id, "chats")
+		prompts_collection = tenant_collections.get_collection(tenant_id, "prompts")
+		documents_collection = tenant_collections.get_collection(tenant_id, "documents")
+		tools_collection = tenant_collections.get_collection(tenant_id, "tools")
+
+		if chats_collection.count_documents({"chat_id": chat_id}) == 0:
+			raise HTTPException(status_code=404, detail="Chat not found")
+
+		message_id = str(uuid.uuid4())
+
+		base64_images = None
+		if images:
+			base64_images = []
+			for img in images:
+				contents = await img.read()
+				base64_images.append(base64.b64encode(contents).decode('utf-8'))
+
+		return StreamingResponse(
+			stream_chat(
+				chat_id=chat_id,
+				message_id=message_id,
+				new_message=message,
+				chats_collection=chats_collection,
+				prompts_collection=prompts_collection,
+				documents_collection=documents_collection,
+				tools_collection=tools_collection,
+				dry_run=dry_run,
+				model=model,
+				rag_table_name=tenant_id,
+				db=db,
+				new_images=base64_images
+			),
+			media_type="text/event-stream"
+		)
+
+	except HTTPException:
+		raise
+	except Exception as e:
+		logger.error(f"Error setting up streaming chat: {e}")
+		raise HTTPException(status_code=400, detail="Error setting up streaming chat")
 
 
 @chats_router.get("/", response_model=List[Chat])

@@ -105,6 +105,70 @@ def call_gpt_single(
   return result
 
 
+def call_gpt_stream(
+    messages: list[dict],
+    sysprompt: str = None,
+    client=openai_client,
+    json_mode: bool = False,
+    model: str = "gpt-4o",
+    tools: list[dict] = None,
+    tool_choice: str = "auto"
+):
+  """Streaming version of call_gpt. Yields text chunks as they arrive.
+  Access the full result dict (message + tool_calls) via StopIteration.value
+  after exhausting the generator."""
+  logger.info("Calling GPT (streaming)")
+  if sysprompt is not None:
+    messages = [{"role": "developer", "content": sysprompt}] + messages
+
+  messages = [{k: v for k, v in d.items() if k != "message_id" and k != "timestamp"} for d in messages]
+
+  for msg in messages:
+    if isinstance(msg.get("content"), dict):
+      msg["content"] = json.dumps(msg["content"])
+
+  kwargs = {}
+  if json_mode:
+    kwargs["response_format"] = {"type": "json_object"}
+  if tools:
+    tools = [{k: v for k, v in d.items() if k != "tool_id"} for d in tools]
+    kwargs["tools"] = tools
+    kwargs["tool_choice"] = tool_choice
+
+  stream = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    stream=True,
+    **kwargs
+  )
+
+  full_content = ""
+  raw_tool_calls = {}
+
+  for chunk in stream:
+    if not chunk.choices:
+      continue
+    delta = chunk.choices[0].delta
+    if delta.content:
+      full_content += delta.content
+      yield delta.content
+    if delta.tool_calls:
+      for tc in delta.tool_calls:
+        i = tc.index
+        if i not in raw_tool_calls:
+          raw_tool_calls[i] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+        if tc.id:
+          raw_tool_calls[i]["id"] += tc.id
+        if tc.function.name:
+          raw_tool_calls[i]["function"]["name"] += tc.function.name
+        if tc.function.arguments:
+          raw_tool_calls[i]["function"]["arguments"] += tc.function.arguments
+
+  tool_calls = [raw_tool_calls[i] for i in sorted(raw_tool_calls)] if raw_tool_calls else None
+  logger.info(f"Streaming completion received. tool_calls: {tool_calls is not None}")
+  return {"message": full_content, "tool_calls": tool_calls}
+
+
 def get_tools(sysprompt, tools_collection):
   if "toolset" in sysprompt:
     logger.info(f"Toolset found in sysprompt: {sysprompt['toolset']}")
@@ -135,7 +199,7 @@ def call_llm_and_process_tools(
     tool_choice="auto",
     context_arguments=None,
     model="gpt-4o",
-    max_chained_tool_calls=10
+    max_chained_tool_calls=100
 ):
   logger.info("Calling LLM")
       
@@ -372,3 +436,183 @@ def process_chat(
       error_callback_func(chat_id, e)
     raise e
 
+
+def stream_chat(
+    chat_id: str,
+    message_id: str,
+    new_message: str,
+    chats_collection,
+    prompts_collection,
+    documents_collection,
+    tools_collection,
+    sysprompt_id: Optional[str] = None,
+    dry_run=False,
+    json_mode=False,
+    tool_choice="auto",
+    call_llm_func=call_gpt_stream,
+    model="gpt-4o",
+    rag_func=perform_postgre_search,
+    rag_table_name: str = None,
+    persist_rag_results=False,
+    context_arguments=None,
+    db: Session = None,
+    spacy_model=spacy_model,
+    function_dictionary=default_function_dictionary,
+    skip_word=None,
+    sysprompt_suffix: Optional[str] = None,
+    new_images: Optional[list[str]] = None,
+    max_chained_tool_calls=10
+):
+  """Sync generator for streaming chat responses. Yields SSE-formatted strings.
+  Handles the full pipeline (setup, RAG, LLM, tool loop, DB save) inline."""
+  try:
+    # Get the chat history
+    chat = chats_collection.find_one({"chat_id": chat_id})
+    if not chat:
+      raise ValueError(f"Chat {chat_id} not found.")
+
+    # Update chat status to in_progress
+    chats_collection.update_one(
+      {"chat_id": chat_id},
+      {"$push": {"statuses": {"message_id": message_id, "status": "in_progress"}}}
+    )
+
+    # Find the sysprompt
+    if sysprompt_id is None:
+      sysprompt_id = chat["sysprompt_id"]
+      if not sysprompt_id:
+        raise ValueError(f"System prompt for chat {chat_id} not found.")
+
+    sysprompt = prompts_collection.find_one({"prompt_id": sysprompt_id})
+    if not sysprompt:
+      raise ValueError(f"Prompt {sysprompt_id} not found.")
+
+    if sysprompt_suffix is not None:
+      sysprompt["prompt"] = sysprompt["prompt"] + "\n\n" + sysprompt_suffix
+
+    tools = get_tools(sysprompt, tools_collection)
+    sysprompt = add_documents_to_sysprompt(sysprompt, documents_collection)
+
+    new_message, rag_result = add_rag_results_to_message(
+      sysprompt=sysprompt,
+      new_message=new_message,
+      rag_func=rag_func,
+      db=db,
+      spacy_model=spacy_model,
+      persist_rag_results=persist_rag_results,
+      table_name=rag_table_name
+    )
+
+    # Build and save user message
+    old_messages = chat["messages"]
+    if new_images is None:
+      user_message = {
+        "message_id": "q-" + message_id,
+        "role": "user",
+        "content": new_message,
+        "timestamp": datetime.now()
+      }
+    else:
+      user_message = {
+        "message_id": "q-" + message_id,
+        "role": "user",
+        "content": [
+          {"type": "text", "text": new_message}
+        ] + [
+          {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}}
+          for image in new_images
+        ],
+        "timestamp": datetime.now()
+      }
+    new_messages = old_messages + [user_message]
+    chats_collection.update_one(
+      {"chat_id": chat_id}, {"$push": {"messages": user_message}}
+    )
+
+    if rag_result is not None and not persist_rag_results:
+      rag_connecting_prompt = sysprompt.get("documents", {}).get("rag_connecting_prompt", "Related information:")
+      new_messages[-1]["content"] = (
+        new_messages[-1]["content"] +
+        "\n\n" +
+        rag_connecting_prompt +
+        "\n" +
+        rag_result
+      )
+
+    # LLM call
+    if dry_run:
+      full_response = "This is a test message."
+      yield f"data: {json.dumps({'type': 'chunk', 'content': full_response})}\n\n"
+    else:
+      full_response = ""
+      n_tries = 0
+      while True:
+        gen = call_llm_func(
+          messages=new_messages,
+          sysprompt=sysprompt["prompt"],
+          tools=tools,
+          json_mode=json_mode,
+          tool_choice=tool_choice,
+          model=model
+        )
+        try:
+          while True:
+            chunk = next(gen)
+            yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+        except StopIteration as e:
+          llm_result = e.value
+
+        if llm_result["tool_calls"] is None:
+          full_response = llm_result["message"]
+          break
+
+        if n_tries >= max_chained_tool_calls:
+          raise ValueError("Too many chained tool calls.")
+        n_tries += 1
+
+        new_messages.append({
+          "role": "assistant",
+          "tool_calls": llm_result["tool_calls"]
+        })
+        for tc in llm_result["tool_calls"]:
+          logger.info(f"Calling tool {tc['function']['name']}")
+          tool_result = tool_handler(
+            name=tc["function"]["name"],
+            arguments=json.loads(tc["function"]["arguments"]),
+            tools_collection=tools_collection,
+            function_dictionary=function_dictionary,
+            context_arguments=context_arguments
+          )
+          logger.info(f"Tool {tc['function']['name']} returned: {tool_result}")
+          new_messages.append({
+            "tool_call_id": tc["id"],
+            "role": "tool",
+            "name": tc["function"]["name"],
+            "content": str(tool_result),
+          })
+
+    if skip_word is not None and full_response == skip_word:
+      full_response = None
+
+    # Save to MongoDB
+    content = full_response
+    if isinstance(content, dict):
+      content = json.dumps(content)
+    response_message = {
+      "message_id": message_id,
+      "role": "assistant",
+      "content": content,
+      "timestamp": datetime.now()
+    }
+    chats_collection.update_one(
+      {"chat_id": chat_id},
+      {"$push": {"statuses": {"message_id": message_id, "status": "completed"}, "messages": response_message}}
+    )
+    logger.info(f"Streaming chat {chat_id} completed successfully.")
+
+    yield f"data: {json.dumps({'type': 'done', 'message_id': message_id, 'message': content})}\n\n"
+
+  except Exception as e:
+    logger.error(f"Error in streaming chat {chat_id}: {e}")
+    yield f"data: {json.dumps({'type': 'error', 'detail': str(e)})}\n\n"
+    raise

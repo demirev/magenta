@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "magenta"
+version = "0.1.0"
+description = "FastAPI skeleton for agentic LLM applications"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.6",
+    "uvicorn>=0.34.0",
+    "openai>=1.57.4",
+    "pymongo>=4.10.1",
+    "pydantic>=2.10.3",
+    "sqlalchemy>=2.0.36",
+    "pgvector>=0.3.6",
+    "psycopg2-binary>=2.9.10",
+    "PyMuPDF>=1.25.1",
+    "PyJWT>=2.10.1",
+    "passlib>=1.7.4",
+    "bcrypt>=4.2.1",
+    "loguru>=0.7.3",
+    "python-multipart>=0.0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "httpx>=0.28.1",
+    "fpdf>=1.7.2",
+    "requests>=2.32.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
