@@ -287,6 +287,7 @@ def process_chat(
     context_arguments=None,
     db: Session = Depends(get_db),
     spacy_model=spacy_model,
+    max_chained_tool_calls=10,
     function_dictionary=default_function_dictionary,
     skip_word=None, # e.g. "PASS" might mean "don't send message" depending on the prompt
     sysprompt_suffix: Optional[str] = None, # this will be added to the end of the sysprompt. Usefull for runtime modifications of the sysprompt
@@ -392,6 +393,7 @@ def process_chat(
         tools_collection=tools_collection,
         context_arguments=context_arguments,
         function_dictionary=function_dictionary,
+        max_chained_tool_calls=max_chained_tool_calls,
         model=model
       )
 
