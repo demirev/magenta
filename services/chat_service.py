@@ -257,7 +257,7 @@ def call_llm_and_process_tools(
       sysprompt=sysprompt["prompt"],
       tools=tools,
       json_mode=json_mode,
-      tool_choice=tool_choice,
+      tool_choice="auto",  # always auto after first tool call so LLM can choose to stop
       model=model
     )
 
