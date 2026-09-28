@@ -204,7 +204,7 @@ async def list_chats(
 	# remove internal messages from the response
 	processed_chats = []
 	for chat in chats:
-		chat["messages"] = [m for m in chat["messages"] if "message_id" in m] # internal messages have no message_id
+		chat["messages"] = [m for m in chat["messages"] if "message_id" in m and not m.get("internal")]
 		processed_chats.append(chat)
 
 	return processed_chats
@@ -219,7 +219,7 @@ async def get_chat(
 	chat = chats_collection.find_one({"chat_id": chat_id}, {"_id": 0})
 	if not chat:
 		raise HTTPException(status_code=404, detail="Chat not found")
-	chat["messages"] = [m for m in chat["messages"] if "message_id" in m] # internal messages have no message_id
+	chat["messages"] = [m for m in chat["messages"] if "message_id" in m and not m.get("internal")]
 	return chat
 
 
@@ -238,7 +238,7 @@ async def list_chat_messages(
 	messages = chat["messages"]
 
 	if no_internal:
-		messages = [m for m in messages if "message_id" in m] # internal messages have no message_id
+		messages = [m for m in messages if "message_id" in m and not m.get("internal")]
 	
 	messages = [
 		{
@@ -263,7 +263,7 @@ async def get_chat_message(
 	if not chat:
 		raise HTTPException(status_code=404, detail="Chat not found")
 	messages = chat["messages"]
-	message = next((m for m in messages if m.get("message_id", False) == message_id), None)
+	message = next((m for m in messages if m.get("message_id", False) == message_id and not m.get("internal")), None)
 	if not message:
 		raise HTTPException(status_code=404, detail="Message not found")
 	return message
@@ -279,10 +279,10 @@ async def get_chat_message_status(
 	if not chat:
 		raise HTTPException(status_code=404, detail="Chat not found")
 	statuses = chat["statuses"]
-	status = next((s for s in statuses if s["message_id"] == message_id), None)
+	status = next((s for s in reversed(statuses) if s["message_id"] == message_id), None) # latest status for this message
 	if not status:
 		raise HTTPException(status_code=404, detail="Message not found")
-	return {"task_id": message_id, "status": status["status"]}
+	return {"task_id": message_id, "status": status["status"], "result": {"error": status["error"]} if "error" in status else None}
 
 
 @chats_router.get("/{chat_id}/status", response_model=Task)
@@ -299,7 +299,11 @@ async def get_chat_status(
 	if len(statuses) == 0:
 		raise HTTPException(status_code=404, detail="No messages found")
 	latest_status = statuses[-1]
-	return {"task_id": latest_status["message_id"], "status": latest_status["status"]}
+	return {
+		"task_id": latest_status["message_id"],
+		"status": latest_status["status"],
+		"result": {"error": latest_status["error"]} if "error" in latest_status else None
+	}
 
 
 @chats_router.delete("/{chat_id}")

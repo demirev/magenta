@@ -55,13 +55,17 @@ magenta/
 
 ### Chat Management
 - Multi-tenant chat sessions with message history
-- Asynchronous message processing with status tracking
+- Asynchronous message processing with status tracking (`in_progress`, then `completed` or `failed` with an `error` text)
+- Tool calls and tool results are stored as internal messages, replayed to the LLM on later turns and hidden from message listings
 - Image upload support in messages
 
 ### LLM Integration
 - OpenAI API integration with function calling
 - Tool chaining with iteration limits (max 10)
-- JSON mode support for structured outputs
+- JSON mode support for structured outputs, with an optional `response_format` (e.g. a strict JSON schema)
+- Retries with backoff for rate limits, connection errors and server errors
+- JSON-mode completions with invalid JSON or control characters are retried; remaining control characters are stripped
+- `aprocess_chat` runs `process_chat` in a worker thread for async callers
 
 ### Tool System
 - **Function tools**: Python callables executed locally
@@ -192,6 +196,12 @@ docker-compose run tests
 
 # Or locally
 pytest tests/
+```
+
+`tests/tests.py` runs against a live app and databases. `tests/test_chat_service.py` is offline (mongomock and a fake OpenAI client) and can run alone:
+```bash
+pip install pytest mongomock
+PYTHONPATH=. pytest tests/test_chat_service.py
 ```
 
 ### Initial Data

@@ -1,5 +1,5 @@
 ---                                                                                                                                                                                   
-  Function 1: call_gpt() (lines 12-83)                                     
+  Function 1: call_gpt()                                     
 
   Purpose: Low-level wrapper around OpenAI's chat completions API.
 
@@ -20,18 +20,34 @@
   │ tools       │ list[dict]    │ Tool definitions                          │
   ├─────────────┼───────────────┼───────────────────────────────────────────┤
   │ tool_choice │ str           │ "auto", "none", or specific tool          │
+  ├─────────────┼───────────────┼───────────────────────────────────────────┤
+  │ response_   │ dict          │ Optional response_format used in          │
+  │ format      │               │ json_mode, e.g. a strict json_schema spec │
+  │             │               │ (default: {"type": "json_object"})        │
   └─────────────┴───────────────┴───────────────────────────────────────────┘
   Logic:
-  1. Insert system prompt as first message with role "developer"
-  2. Strip internal fields (message_id, timestamp, tool_id) before API call
-  3. Call OpenAI API (4 branches: json_mode × tools)
-  4. Extract message content and tool_calls from response
-  5. Return {"message": ..., "tool_calls": ... or None}
+  1. In json_object mode, append "Respond in JSON." to the system prompt if neither
+     the prompt nor the messages contain the word "json" (OpenAI rejects the request otherwise)
+  2. Prepend the system prompt as a "developer" message (the caller's list is not modified)
+  3. Strip storage fields (message_id, timestamp, internal, tool_id) before the API call
+  4. Call the OpenAI API; RateLimitError, APIConnectionError (incl. timeouts) and
+     InternalServerError are retried up to 3 times with 1/2/4 s backoff
+  5. In json_mode, parse the content:
+     - missing or invalid JSON is retried once, then raises ValueError
+       (content next to tool_calls is returned unparsed instead)
+     - C0 control characters other than \t, \n, \r in any string (garbled \u00XX escapes)
+       trigger up to 2 retries, after which they are stripped
+  6. Return {"message": ..., "tool_calls": ... or None}
 
-  Note: There's a bug on line 53 - uses result before it's defined (should be completion).
+  To use Structured Outputs in process_chat, pass
+  call_llm_func=functools.partial(call_gpt, response_format={"type": "json_schema", ...}).
+
+  call_gpt_stream applies the same "json" word rule and request retries. Chunks are already
+  sent when the content is checked, so control characters are stripped from the final
+  message without a retry.
 
   ---
-  Function 2: call_gpt_single() (lines 86-99)
+  Function 2: call_gpt_single()
 
   Purpose: Convenience wrapper for single-turn prompts without tool use.
 
@@ -51,7 +67,7 @@
   3. Return result
 
   ---
-  Function 3: get_tools() (lines 102-121)
+  Function 3: get_tools()
 
   Purpose: Load tool definitions from MongoDB based on the prompt's toolset field.
 
@@ -75,7 +91,7 @@
   Key behavior: Context parameters are removed here so the LLM never sees them.
 
   ---
-  Function 4: call_llm_and_process_tools() (lines 124-192)
+  Function 4: call_llm_and_process_tools()
 
   Purpose: The tool execution loop - calls LLM, executes any requested tools, repeats until done.
 
@@ -100,17 +116,21 @@
   │ context_arguments      │ Hidden args to inject into tool calls    │
   ├────────────────────────┼──────────────────────────────────────────┤
   │ max_chained_tool_calls │ Loop limit (default: 10)                 │
+  ├────────────────────────┼──────────────────────────────────────────┤
+  │ tool_messages          │ Optional list; each completed tool round │
+  │                        │ is appended to it                        │
   └────────────────────────┴──────────────────────────────────────────┘
   Logic:
   1. Call LLM with messages, sysprompt, and tools
   2. WHILE response contains tool_calls:
-     a. Append assistant message with tool_calls to history
+     a. Build the round: assistant message with tool_calls
      b. Check iteration count (prevent infinite loop)
      c. FOR each tool_call:
         - Execute via tool_handler (injects context_arguments)
-        - Append tool result to messages
-     d. Call LLM again with updated messages
-  3. Return final message
+        - Add a tool message with the result (as a string)
+     d. Append the round to new_messages and to tool_messages
+     e. Call LLM again with updated messages
+  3. Return {"message": final message}
 
   Flow Diagram:
   ┌─────────────┐
@@ -140,7 +160,7 @@
       (loop back to Call LLM)
 
   ---
-  Function 5: process_chat() (lines 195-359)
+  Function 5: process_chat()
 
   Purpose: Main entry point - orchestrates the full chat processing pipeline.
 
@@ -219,13 +239,28 @@
   └── 14. Else: call_llm_and_process_tools()
 
   PHASE 5: RESPONSE HANDLING
-  ├── 15. Check skip_word (suppress if matched)
-  ├── 16. Save status "completed" + assistant message to MongoDB
+  ├── 15. Check skip_word (suppress if matched; the callback is then not called)
+  ├── 16. Save status "completed", the tool rounds as internal messages and the
+  │       assistant message to MongoDB in one update
   ├── 17. Call callback_func if provided
   └── 18. Return result
 
   PHASE 6: ERROR HANDLING
-  └── 19. On exception: call error_callback_func, re-raise
+  ├── 19. Save completed tool rounds as internal messages and push
+  │       {"message_id", "status": "failed", "error": <first 500 chars>}
+  └── 20. Call error_callback_func, re-raise
+
+  stream_chat follows the same persistence and failure rules.
+  aprocess_chat(*args, **kwargs) runs process_chat in a worker thread for async callers.
+
+  Stored message layout of one exchange:
+    {"message_id": "q-<id>", "role": "user", ...}
+    {"message_id": "<id>", "role": "assistant", "tool_calls": [...], "internal": true, ...}   ┐ per tool
+    {"message_id": "<id>", "role": "tool", "tool_call_id": ..., "content": "...", "internal": true, ...} ┘ round
+    {"message_id": "<id>", "role": "assistant", "content": "...", ...}
+  Internal messages are sent to the LLM on later turns and excluded from get_chat,
+  list_chats, get_chat_message and list_chat_messages (unless no_internal=False).
+  Deleting a message by id removes its internal messages too.
 
   ---
   Overall Architecture
@@ -275,5 +310,5 @@
   1. Dependency Injection: call_llm_func, rag_func, function_dictionary are all injectable, making the service testable and extensible.
   2. Message ID Convention: User messages get q-{id}, assistant responses get {id} - allows pairing question/answer.
   3. RAG Append Strategy: RAG results are appended to the user message after saving to DB, so stored messages stay clean but LLM sees context.
-  4. Status Tracking: Each message has a status trail (in_progress → completed) for async monitoring.
+  4. Status Tracking: Each message has a status trail (in_progress → completed or failed) for async monitoring. The status routes report the latest entry and, for failures, the error under result.error.
   5. Callbacks: Supports both success and error callbacks for integration with external systems (e.g., webhooks, notifications).

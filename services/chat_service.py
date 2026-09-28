@@ -1,4 +1,8 @@
+import re
 import json
+import time
+import asyncio
+import openai
 from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -9,6 +13,21 @@ from core.tools import tool_handler, default_function_dictionary
 from .document_service import perform_postgre_search, add_rag_results_to_message, add_documents_to_sysprompt
 
 
+# OpenAI errors worth retrying with backoff (APITimeoutError is a subclass of APIConnectionError)
+TRANSIENT_ERRORS = (openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError)
+
+
+def strip_control_chars(value):
+  # recursively remove C0 control characters other than \t, \n, \r from all strings in a parsed JSON value
+  if isinstance(value, str):
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", value)
+  if isinstance(value, list):
+    return [strip_control_chars(v) for v in value]
+  if isinstance(value, dict):
+    return {strip_control_chars(k): strip_control_chars(v) for k, v in value.items()}
+  return value
+
+
 def call_gpt(
     messages: list[dict], 
     sysprompt: str = None, 
@@ -16,14 +35,21 @@ def call_gpt(
     json_mode: bool = False, 
     model: str = "gpt-4o", 
     tools: list[dict] = None, 
-    tool_choice: str = "auto"
+    tool_choice: str = "auto",
+    response_format: Optional[dict] = None # overrides json_object in json_mode, e.g. a json_schema spec
   ) -> dict:
   logger.info(f"Calling GPT")
-  if sysprompt is not None:
-    messages.insert(0, {"role": "developer", "content": sysprompt})
+  if json_mode and (response_format or {}).get("type", "json_object") == "json_object" and not any(
+    "json" in str(m.get("content")).lower() for m in messages + [{"content": sysprompt}]
+  ):
+    # OpenAI rejects json_object mode unless the word "json" appears in the messages
+    sysprompt = "Respond in JSON." if sysprompt is None else sysprompt + "\n\nRespond in JSON."
 
-  # make sure messages don't include message_id and timestamp
-  messages = [{k: v for k, v in d.items() if k != "message_id" and k != "timestamp"} for d in messages]
+  if sysprompt is not None:
+    messages = [{"role": "developer", "content": sysprompt}] + messages
+
+  # make sure messages don't include message_id, timestamp and internal
+  messages = [{k: v for k, v in d.items() if k not in ("message_id", "timestamp", "internal")} for d in messages]
 
   # OpenAI requires content to be a string (or multimodal array), not a dict
   for msg in messages:
@@ -38,43 +64,53 @@ def call_gpt(
     tools = [{k: v for k, v in d.items() if k != "tool_id"} for d in tools]
     logger.info(f"Tools found: {tools}")
 
+  kwargs = {"model": model, "messages": messages}
   if json_mode:
-    if len(tools):
-      completion = client.chat.completions.create(
-        model=model,
-        response_format={ "type": "json_object" },
-        messages=messages,
-        tools=tools,
-        tool_choice=tool_choice
-      )
-    else:
-      completion = client.chat.completions.create(
-        model=model,
-        response_format={ "type": "json_object" },
-        messages=messages
-      )
-    
+    kwargs["response_format"] = response_format or {"type": "json_object"}
+  if len(tools):
+    kwargs["tools"] = tools
+    kwargs["tool_choice"] = tool_choice
+
+  n_transient = 0
+  n_bad = 0 # bad JSON-mode completions: retried twice for control characters, once for missing or invalid JSON
+  while True:
+    try:
+      completion = client.chat.completions.create(**kwargs)
+    except TRANSIENT_ERRORS as e:
+      if n_transient >= 3:
+        raise
+      logger.warning(f"Transient OpenAI error, retrying in {2 ** n_transient}s: {e}")
+      time.sleep(2 ** n_transient)
+      n_transient += 1
+      continue
+
     content = completion.choices[0].message.content
-    result = {
-      "message": json.loads(content) if content is not None else None
-    }
-  else:
-    if len(tools):
-      completion = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=tools,
-        tool_choice=tool_choice
-      )
-    else:
-      completion = client.chat.completions.create(
-        model=model,
-        messages=messages
-      )
-    
-    result = {
-      "message":completion.choices[0].message.content
-    }
+    if not json_mode:
+      result = {"message": content}
+      break
+
+    try:
+      parsed = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as e:
+      if completion.choices[0].message.tool_calls:
+        # content alongside tool calls is not used as the answer
+        result = {"message": content}
+        break
+      if n_bad >= 1:
+        raise ValueError(f"LLM returned no valid JSON in json_mode (content: {content!r:.200})") from e
+      logger.warning(f"LLM returned no valid JSON in json_mode, retrying: {content!r:.200}")
+      n_bad += 1
+      continue
+
+    cleaned = strip_control_chars(parsed)
+    if cleaned != parsed and n_bad < 2:
+      logger.warning(f"Control characters in JSON-mode completion, retrying: {content!r:.200}")
+      n_bad += 1
+      continue
+    if cleaned != parsed:
+      logger.warning("Control characters in JSON-mode completion after retries, stripping them.")
+    result = {"message": cleaned}
+    break
 
   logger.info(f"Completion received: {completion.choices[0].message}")
 
@@ -118,10 +154,14 @@ def call_gpt_stream(
   Access the full result dict (message + tool_calls) via StopIteration.value
   after exhausting the generator."""
   logger.info("Calling GPT (streaming)")
+  if json_mode and not any("json" in str(m.get("content")).lower() for m in messages + [{"content": sysprompt}]):
+    # OpenAI rejects json_object mode unless the word "json" appears in the messages
+    sysprompt = "Respond in JSON." if sysprompt is None else sysprompt + "\n\nRespond in JSON."
+
   if sysprompt is not None:
     messages = [{"role": "developer", "content": sysprompt}] + messages
 
-  messages = [{k: v for k, v in d.items() if k != "message_id" and k != "timestamp"} for d in messages]
+  messages = [{k: v for k, v in d.items() if k not in ("message_id", "timestamp", "internal")} for d in messages]
 
   for msg in messages:
     if isinstance(msg.get("content"), dict):
@@ -135,12 +175,23 @@ def call_gpt_stream(
     kwargs["tools"] = tools
     kwargs["tool_choice"] = tool_choice
 
-  stream = client.chat.completions.create(
-    model=model,
-    messages=messages,
-    stream=True,
-    **kwargs
-  )
+  # only the request is retried; errors after streaming has started propagate
+  n_transient = 0
+  while True:
+    try:
+      stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+        **kwargs
+      )
+      break
+    except TRANSIENT_ERRORS as e:
+      if n_transient >= 3:
+        raise
+      logger.warning(f"Transient OpenAI error, retrying in {2 ** n_transient}s: {e}")
+      time.sleep(2 ** n_transient)
+      n_transient += 1
 
   full_content = ""
   raw_tool_calls = {}
@@ -166,6 +217,18 @@ def call_gpt_stream(
 
   tool_calls = [raw_tool_calls[i] for i in sorted(raw_tool_calls)] if raw_tool_calls else None
   logger.info(f"Streaming completion received. tool_calls: {tool_calls is not None}")
+
+  if json_mode and tool_calls is None:
+    # chunks are already sent, so garbled escapes are stripped from the final message rather than retried
+    try:
+      parsed = json.loads(full_content)
+    except json.JSONDecodeError:
+      logger.warning(f"Streamed JSON-mode completion is not valid JSON: {full_content!r:.200}")
+      parsed = None
+    cleaned = strip_control_chars(parsed)
+    if cleaned != parsed:
+      logger.warning("Control characters in streamed JSON-mode completion, stripping them.")
+      full_content = json.dumps(cleaned, ensure_ascii=False)
   return {"message": full_content, "tool_calls": tool_calls}
 
 
@@ -199,7 +262,8 @@ def call_llm_and_process_tools(
     tool_choice="auto",
     context_arguments=None,
     model="gpt-4o",
-    max_chained_tool_calls=100
+    max_chained_tool_calls=100,
+    tool_messages: Optional[list] = None # if given, each completed tool round (assistant tool_calls + tool results) is appended to it
 ):
   logger.info("Calling LLM")
       
@@ -215,12 +279,12 @@ def call_llm_and_process_tools(
   
   n_tries = 0
   while llm_result["tool_calls"] is not None:
-    new_messages.append(
+    round_messages = [
       {
         "role":"assistant", 
         "tool_calls":[tool_call.model_dump() for tool_call in llm_result["tool_calls"]]
       }
-    ) 
+    ]
     
     n_tool_calls = len(llm_result["tool_calls"])
     logger.info(f"{n_tool_calls} tool calls detected. Iteration {n_tries}")
@@ -241,7 +305,7 @@ def call_llm_and_process_tools(
         context_arguments = context_arguments
       )
       logger.info(f"Tool {tool_call.function.name} returned: {tool_result}")
-      new_messages.append(
+      round_messages.append(
         {
           "tool_call_id": tool_call.id,
           "role":"tool",
@@ -249,6 +313,10 @@ def call_llm_and_process_tools(
           "content": str(tool_result),
         }
       )
+
+    new_messages.extend(round_messages)
+    if tool_messages is not None:
+      tool_messages.extend(round_messages)
 
     # new call with tool results
     logger.info("Calling LLM with tool results.")
@@ -293,6 +361,7 @@ def process_chat(
     sysprompt_suffix: Optional[str] = None, # this will be added to the end of the sysprompt. Usefull for runtime modifications of the sysprompt
     new_images: Optional[list[str]] = None # a list of base64 encoded images to be added to the message
 ):
+  tool_messages = [] # set to None once the turn is saved
   try:
 
     # Get the chat history
@@ -394,7 +463,8 @@ def process_chat(
         context_arguments=context_arguments,
         function_dictionary=function_dictionary,
         max_chained_tool_calls=max_chained_tool_calls,
-        model=model
+        model=model,
+        tool_messages=tool_messages
       )
 
     if skip_word is not None: 
@@ -402,21 +472,25 @@ def process_chat(
       if result["message"] == skip_word:
         result.pop("message")
     
-    # update mongo
+    # update mongo; tool rounds are stored as internal messages ahead of the response so later turns replay them
     new_status = {"message_id": message_id, "status": "completed"}
-    content = result["message"]
+    content = result.get("message")
     if isinstance(content, dict):
       content = json.dumps(content)
     response_message = {"message_id": message_id, "role": "assistant", "content": content, "timestamp": datetime.now()}
+    internal_messages = [
+      {**m, "message_id": message_id, "internal": True, "timestamp": datetime.now()} for m in tool_messages
+    ]
     
     chats_collection.update_one(
       {"chat_id": chat_id}, 
-      {"$push": {"statuses": new_status, "messages": response_message}}
+      {"$push": {"statuses": new_status, "messages": {"$each": internal_messages + [response_message]}}}
     )
+    tool_messages = None
     logger.info(f"Chat {chat_id} completed successfully.")
 
     # send messages
-    if callback_func is not None:
+    if callback_func is not None and "message" in result:
       logger.info(f"Sending messages for chat {chat_id}.")
       
       #session_id = chats_collection.find_one(
@@ -434,6 +508,20 @@ def process_chat(
 
   except Exception as e:
     logger.error(f"Error processing chat {chat_id}: {e}")
+    if tool_messages is not None:
+      # keep completed tool rounds (their side effects happened) and mark the turn as failed
+      try:
+        chats_collection.update_one(
+          {"chat_id": chat_id},
+          {"$push": {
+            "statuses": {"message_id": message_id, "status": "failed", "error": str(e)[:500]},
+            "messages": {"$each": [
+              {**m, "message_id": message_id, "internal": True, "timestamp": datetime.now()} for m in tool_messages
+            ]}
+          }}
+        )
+      except Exception as db_error:
+        logger.error(f"Could not record failure of chat {chat_id}: {db_error}")
     if error_callback_func is not None:
       error_callback_func(chat_id, e)
     raise e
@@ -467,6 +555,7 @@ def stream_chat(
 ):
   """Sync generator for streaming chat responses. Yields SSE-formatted strings.
   Handles the full pipeline (setup, RAG, LLM, tool loop, DB save) inline."""
+  tool_messages = [] # set to None once the turn is saved
   try:
     # Get the chat history
     chat = chats_collection.find_one({"chat_id": chat_id})
@@ -572,10 +661,10 @@ def stream_chat(
           raise ValueError("Too many chained tool calls.")
         n_tries += 1
 
-        new_messages.append({
+        round_messages = [{
           "role": "assistant",
           "tool_calls": llm_result["tool_calls"]
-        })
+        }]
         for tc in llm_result["tool_calls"]:
           logger.info(f"Calling tool {tc['function']['name']}")
           tool_result = tool_handler(
@@ -586,12 +675,14 @@ def stream_chat(
             context_arguments=context_arguments
           )
           logger.info(f"Tool {tc['function']['name']} returned: {tool_result}")
-          new_messages.append({
+          round_messages.append({
             "tool_call_id": tc["id"],
             "role": "tool",
             "name": tc["function"]["name"],
             "content": str(tool_result),
           })
+        new_messages.extend(round_messages)
+        tool_messages.extend(round_messages)
 
     if skip_word is not None and full_response == skip_word:
       full_response = None
@@ -606,15 +697,41 @@ def stream_chat(
       "content": content,
       "timestamp": datetime.now()
     }
+    internal_messages = [
+      {**m, "message_id": message_id, "internal": True, "timestamp": datetime.now()} for m in tool_messages
+    ]
     chats_collection.update_one(
       {"chat_id": chat_id},
-      {"$push": {"statuses": {"message_id": message_id, "status": "completed"}, "messages": response_message}}
+      {"$push": {
+        "statuses": {"message_id": message_id, "status": "completed"},
+        "messages": {"$each": internal_messages + [response_message]}
+      }}
     )
+    tool_messages = None
     logger.info(f"Streaming chat {chat_id} completed successfully.")
 
     yield f"data: {json.dumps({'type': 'done', 'message_id': message_id, 'message': content})}\n\n"
 
   except Exception as e:
     logger.error(f"Error in streaming chat {chat_id}: {e}")
+    if tool_messages is not None:
+      # keep completed tool rounds (their side effects happened) and mark the turn as failed
+      try:
+        chats_collection.update_one(
+          {"chat_id": chat_id},
+          {"$push": {
+            "statuses": {"message_id": message_id, "status": "failed", "error": str(e)[:500]},
+            "messages": {"$each": [
+              {**m, "message_id": message_id, "internal": True, "timestamp": datetime.now()} for m in tool_messages
+            ]}
+          }}
+        )
+      except Exception as db_error:
+        logger.error(f"Could not record failure of chat {chat_id}: {db_error}")
     yield f"data: {json.dumps({'type': 'error', 'detail': str(e)})}\n\n"
     raise
+
+
+async def aprocess_chat(*args, **kwargs):
+  """Runs process_chat in a worker thread so async callers do not block the event loop."""
+  return await asyncio.to_thread(process_chat, *args, **kwargs)
